@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Stream Player</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #f0f0f0;
+    }
+    video {
+      width: 80%;
+      max-width: 800px;
+      background-color: black;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <video id="videoPlayer" controls></video>
+  <button id="playButton">Click to Play</button>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script>
+    const video = document.getElementById('videoPlayer');
+    const playButton = document.getElementById('playButton');
+    const streamUrl = 'http://localhost:8000/live/user_user1/index.m3u8';
+
+    let hls;
+    let reconnectInterval;
+
+    const setupHls = () => {
+      if (Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(streamUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          console.log('HLS Manifest Parsed');
+        });
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          console.error('HLS.js Error:', event, data);
+          if (data.fatal) {
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.log('Fatal network error encountered, try to recover');
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.log('Fatal media error encountered, try to recover');
+                hls.recoverMediaError();
+                break;
+              default:
+                hls.destroy();
+                console.error('Unrecoverable error encountered, attempting to reconnect in 3 seconds...');
+                reconnectInterval = setInterval(() => {
+                  console.log('Attempting to reconnect...');
+                  setupHls();
+                }, 3000);
+                break;
+            }
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = streamUrl;
+        video.addEventListener('loadedmetadata', () => {
+          console.log('Native HLS loaded metadata');
+        });
+        video.addEventListener('error', () => {
+          console.error('Native HLS Error, attempting to reconnect in 3 seconds...');
+          reconnectInterval = setInterval(() => {
+            console.log('Attempting to reconnect...');
+            setupHls();
+          }, 3000);
+        });
+      } else {
+        console.error('HLS is not supported in this browser.');
+      }
+    };
+
+    playButton.addEventListener('click', () => {
+      setupHls();
+      video.play();
+      playButton.style.display = 'none';
+    });
+
+    // Page Visibility API to handle playback on page visibility change
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        video.pause();
+      } else {
+        video.play();
+      }
+    });
+  </script>
+</body>
+</html>

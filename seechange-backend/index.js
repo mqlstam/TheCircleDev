@@ -220,7 +220,7 @@ nms.run();
             '-c:v', 'libx264',
             '-preset', 'ultrafast', // Prioritize speed over compression
             '-tune', 'zerolatency',
-            '-crf', '28',          // Lower quality, higher speed 
+            '-crf', '51',          // Lower quality, higher speed 
             '-f', 'flv',
             `rtmp://localhost/live/${streamName}`
           ]);
