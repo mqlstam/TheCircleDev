@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const path = require('path');
 const winston = require('winston');
 const { spawn } = require('child_process');
+const NodeRSA = require('node-rsa');
 
 // Configure winston logging
 const logger = winston.createLogger({
@@ -38,6 +39,10 @@ app.use(cors({
   allowedHeaders: ["Content-Type"],
   credentials: true
 }));
+
+// Generate RSA keys for the server
+const serverPrivateKey = new NodeRSA({b: 2048});
+const serverPublicKey = serverPrivateKey.exportKey('public');
 
 // NMS Configuration
 const nmsConfig = {
@@ -65,19 +70,21 @@ const nmsConfig = {
     ]
   }
 };
-
-
 const nms = new NodeMediaServer(nmsConfig);
 nms.run();
 
 // Track active streams
 const activeStreams = {};
+const JWT_SECRET = 'your_secret_key'; // Replace with a strong secret
+const mongoUrl = 'mongodb://localhost:27017/seechange'; // Replace with your MongoDB connection string
 
-// Secret key for JWT (Replace with a strong secret)
-const JWT_SECRET = 'your_secret_key';
+// In-memory storage for user credentials and keys
+const users = {
+  'user1': { password: 'password1' },
+  'user2': { password: 'password2' }
+};
 
-// MongoDB connection URL (Replace with your MongoDB connection string)
-const mongoUrl = 'mongodb://localhost:27017/seechange';
+const userKeys = {};
 
 // Connect to MongoDB
 let dbClient;
@@ -86,22 +93,12 @@ let dbClient;
     dbClient = new MongoClient(mongoUrl);
     await dbClient.connect();
     console.log('Connected to MongoDB');
-
-    // Access the database and collection
     const db = dbClient.db('seechange');
     const usersCollection = db.collection('users');
     const streamsCollection = db.collection('streams');
 
-    // In-memory user credentials (replace with a database in a real application)
-    const users = {
-      'user1': { password: 'password1' },
-      'user2': { password: 'password2' }
-    };
-
-    // Socket.io Connection
     io.on('connection', (socket) => {
       console.log('User connected');
-
       let streamName = null;
       let userId = null;
       let ffmpegProcess = null;
@@ -115,14 +112,19 @@ let dbClient;
           ffmpegProcess.stdin.write(frame);
         }
       };
-
       const frameTimer = setInterval(sendFrame, frameInterval);
 
       socket.on('login', async (username, password) => {
         try {
           const user = users[username];
           if (user && user.password === password) {
-            // Generate JWT
+            // Generate RSA key pair for the user
+            const key = new NodeRSA({b: 2048});
+            userKeys[username] = {
+              privateKey: key.exportKey('private'),
+              publicKey: key.exportKey('public')
+            };
+
             const token = jwt.sign({ userId: username }, JWT_SECRET);
             socket.emit('loginSuccess', token);
           } else {
@@ -152,15 +154,12 @@ let dbClient;
             activeStreams[streamName] = true;
             socket.emit('streamStarted', streamName);
             io.emit('streamList', Object.keys(activeStreams));
-      
             await streamsCollection.insertOne({
               userId: userId,
               streamName: streamName,
               startTime: new Date(),
               endTime: null
             });
-      
-            // Start ffmpeg process
             ffmpegProcess = spawn('ffmpeg', [
               '-framerate', '25',
               '-f', 'mjpeg',
@@ -171,18 +170,13 @@ let dbClient;
               '-f', 'flv',
               `rtmp://localhost/live/${streamName}`
             ]);
-      
             ffmpegProcess.stderr.on('data', (data) => {
               console.error(`FFmpeg stderr: ${data}`);
             });
-      
             ffmpegProcess.on('close', (code) => {
               console.log(`FFmpeg process exited with code ${code}`);
-              // Clean up
               frameBuffer.length = 0;
             });
-      
-            // Verify the stream start
             console.log(`Stream started: ${streamName}`);
           } catch (error) {
             console.error('Error starting stream:', error);
@@ -199,14 +193,10 @@ let dbClient;
             delete activeStreams[streamName];
             socket.emit('streamStopped', streamName);
             io.emit('streamList', Object.keys(activeStreams));
-
-            // Stop ffmpeg process
             if (ffmpegProcess) {
               ffmpegProcess.stdin.end();
               ffmpegProcess.kill('SIGINT');
             }
-
-            // Update stream metadata in MongoDB
             await streamsCollection.updateOne(
               { streamName: streamName },
               { $set: { endTime: new Date() } }
@@ -218,20 +208,23 @@ let dbClient;
         }
       });
 
-      socket.on('videoData', (videoData, checksum) => {
+      socket.on('videoData', (encryptedData, checksum) => {
         if (userId) {
-          if (!videoData) {
+          if (!encryptedData) {
             console.error('Received null video data');
             socket.emit('streamError', 'Received null video data');
             return;
           }
-
           try {
-            const binaryData = Buffer.from(videoData.split(',')[1], 'base64');
+            const user = users[userId];
+            const clientPrivateKey = new NodeRSA(userKeys[userId].privateKey, 'pkcs1-private-pem'); // Specify format
+            const binaryData = Buffer.from(clientPrivateKey.decrypt(encryptedData, 'base64'), 'base64');
             const receivedChecksum = crypto.createHash('sha256').update(binaryData).digest('hex');
-            // logger.info(`Received checksum: ${receivedChecksum}, Expected checksum: ${checksum}`);
-
-            // Add frame to buffer if there's space
+            if (receivedChecksum !== checksum) {
+              console.error('Checksum mismatch');
+              socket.emit('streamError', 'Checksum mismatch');
+              return;
+            }
             if (frameBuffer.length < MAX_BUFFER_SIZE) {
               frameBuffer.push(binaryData);
             } else {
@@ -252,14 +245,10 @@ let dbClient;
           try {
             delete activeStreams[streamName];
             io.emit('streamList', Object.keys(activeStreams));
-
-            // Stop ffmpeg process
             if (ffmpegProcess) {
               ffmpegProcess.stdin.end();
               ffmpegProcess.kill('SIGINT');
             }
-
-            // Update stream metadata in MongoDB
             await streamsCollection.updateOne(
               { streamName: streamName },
               { $set: { endTime: new Date() } }
@@ -276,12 +265,10 @@ let dbClient;
   }
 })();
 
-// Start HTTP server
 http.listen(3001, () => {
   console.log('Server listening on port 3001');
 });
 
-// Close MongoDB connection on server shutdown
 process.on('SIGINT', async () => {
   await dbClient.close();
   console.log('Disconnected from MongoDB');
