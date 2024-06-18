@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
-import WebcamCapture from './WebcamCapture';
-import videojs from 'video.js';
-import 'video.js/dist/video-js.css';
+import Webcam from 'react-webcam';
+import dashjs from 'dashjs';
 
 function App() {
   const [socket, setSocket] = useState(null);
   const [streamUrl, setStreamUrl] = useState('');
   const videoPlayerRef = useRef(null);
+  const webcamRef = useRef(null);
   const [userId, setUserId] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -26,7 +26,7 @@ function App() {
     setSocket(newSocket);
 
     newSocket.on('streamStarted', (streamName) => {
-      setStreamUrl(`http://localhost:8080/live/${streamName}/index.m3u8`);
+      setStreamUrl(`http://localhost:8080/live/${streamName}/index.mpd`);
       setIsStreaming(true);
       setIsLoading(true);
     });
@@ -72,41 +72,51 @@ function App() {
   }, []);
 
   const handleStreamSelect = (streamName) => {
-    setStreamUrl(`http://localhost:8080/live/${streamName}/index.m3u8`);
+    setStreamUrl(`http://localhost:8080/live/${streamName}/index.mpd`);
     setIsStreaming(true);
     setIsLoading(true);
   };
 
   useEffect(() => {
-    let player;
     if (streamUrl && videoPlayerRef.current) {
-      player = videojs(videoPlayerRef.current, {
-        controls: true,
-        autoplay: true,
-        preload: 'auto',
-        sources: [{ src: streamUrl, type: 'application/x-mpegURL' }],
-      });
-
-      player.on('play', () => {
+      const player = dashjs.MediaPlayer().create();
+      player.initialize(videoPlayerRef.current, streamUrl, true);
+      player.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
         setIsLoading(false);
       });
 
       return () => {
-        if (player) {
-          player.dispose();
-        }
+        player.reset();
       };
     }
   }, [streamUrl]);
 
-  const handleVideoData = async (videoData, checksum) => {
-    console.log(`Sending video data: ${videoData.slice(0, 100)}...`);
-    console.log(`Calculated checksum: ${checksum}`);
+  const handleVideoData = async () => {
+    if (webcamRef.current) {
+      const videoData = webcamRef.current.getScreenshot();
+      if (!videoData) {
+        console.error('Failed to capture screenshot');
+        return;
+      }
 
-    if (socket) {
-      socket.emit('videoData', videoData, checksum);
-      console.log(`Sent video data with checksum: ${checksum}`);
+      try {
+        const checksum = await calculateChecksum(videoData);
+        if (socket) {
+          socket.emit('videoData', videoData, checksum);
+        }
+      } catch (error) {
+        console.error('Error sending video data:', error);
+      }
     }
+  };
+
+  const calculateChecksum = async (data) => {
+    const encoder = new TextEncoder();
+    const dataBuffer = encoder.encode(data);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
   };
 
   const handleStartStop = () => {
@@ -185,14 +195,25 @@ function App() {
           <button onClick={handleStartStop} disabled={!userId || isCapturing}>
             {isCapturing ? 'Stop Streaming' : 'Start Streaming'}
           </button>
-          {isCapturing && <WebcamCapture onVideoData={handleVideoData} />}
+          {isCapturing && (
+            <Webcam
+              audio={false}
+              ref={webcamRef}
+              screenshotFormat="image/jpeg"
+              width="640"
+              height="360"
+              onUserMedia={() => {
+                setInterval(handleVideoData, 40); // Capture frame every 40ms (25 fps)
+              }}
+            />
+          )}
           {isStreaming ? (
             <div>
               {isLoading && <p>Loading stream...</p>}
-              <div data-vjs-player>
+              <div>
                 <video
                   ref={videoPlayerRef}
-                  className="video-js vjs-default-skin"
+                  className="dash-video-player"
                   controls
                   autoPlay
                   muted

@@ -10,7 +10,9 @@ function WebcamCapture({ onVideoData }) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
         setVideoStream(stream);
-        videoRef.current.srcObject = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
         setError(null);
       } catch (error) {
         console.error('Error accessing webcam:', error);
@@ -31,25 +33,29 @@ function WebcamCapture({ onVideoData }) {
     if (videoRef.current) {
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
-      const intervalId = setInterval(async () => {
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      const captureFrame = async () => {
+        if (videoRef.current && videoRef.current.videoWidth && videoRef.current.videoHeight) {
+          canvas.width = videoRef.current.videoWidth;
+          canvas.height = videoRef.current.videoHeight;
+          context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
-        const videoData = canvas.toDataURL('image/jpeg');
-        const checksum = await calculateChecksum(videoData);
+          canvas.toBlob(async (blob) => {
+            const arrayBuffer = await blob.arrayBuffer();
+            const checksum = await calculateChecksum(arrayBuffer);
 
-        onVideoData(videoData, checksum);
-      }, 100);
+            onVideoData(blob, checksum);
+          }, 'image/jpeg', 0.7); // Adjust quality (0.7 is 70% quality)
+        }
+      };
+      
+      const intervalId = setInterval(captureFrame, 66); // Capture at approximately 15 fps
 
       return () => clearInterval(intervalId);
     }
-  }, [videoRef.current]);
+  }, [videoRef, onVideoData]);
 
   const calculateChecksum = async (data) => {
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(data);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
     return Array.from(new Uint8Array(hashBuffer))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
