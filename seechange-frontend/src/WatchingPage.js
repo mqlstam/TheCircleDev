@@ -45,7 +45,6 @@ function WatchingPage() {
     setIsLoading(true);
   };
 
-
   const handleStreamStopped = (streamName) => {
     console.log('Stream stopped:', streamName);
     setStreamUrl('');
@@ -88,8 +87,8 @@ function WatchingPage() {
   };
 
   useEffect(() => {
-    console.log("useEffect for HLS setup triggered"); // Debug: Effect trigger
-    console.log("streamUrl in useEffect:", streamUrl); // Debug: Stream URL value
+    console.log("useEffect for HLS setup triggered");
+    console.log("streamUrl in useEffect:", streamUrl);
 
     let hls;
     let reconnectInterval;
@@ -219,7 +218,9 @@ function WatchingPage() {
       return isVerified;
     };
 
-    setupHls();
+    if (videoPlayerRef.current) { 
+      setupHls();
+    }
 
     return () => {
       if (hls) {
