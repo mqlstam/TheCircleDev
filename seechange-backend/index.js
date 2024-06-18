@@ -1,7 +1,21 @@
 const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const { MongoClient } = require('mongodb');
+const jwt = require('jsonwebtoken');
+const cors = require('cors');
+const crypto = require('crypto');
+const NodeRSA = require('node-rsa');
+const winston = require('winston');
+const bodyParser = require('body-parser');
+const path = require('path');
+const { spawn } = require('child_process');
+const NodeMediaServer = require('node-media-server');
+const { Buffer } = require('buffer');
+
 const app = express();
-const http = require('http').createServer(app);
-const io = require('socket.io')(http, {
+const server = http.createServer(app);
+const io = socketIo(server, {
   cors: {
     origin: "http://localhost:3000",
     methods: ["GET", "POST"],
@@ -9,17 +23,8 @@ const io = require('socket.io')(http, {
     credentials: true
   }
 });
-const NodeMediaServer = require('node-media-server');
-const jwt = require('jsonwebtoken');
-const { MongoClient } = require('mongodb');
-const cors = require('cors');
-const crypto = require('crypto');
-const path = require('path');
-const winston = require('winston');
-const { spawn } = require('child_process');
-const NodeRSA = require('node-rsa');
 
-// Configure winston logging
+// Logger configuration
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -32,19 +37,23 @@ const logger = winston.createLogger({
   ]
 });
 
-// CORS Configuration
+// Middleware setup
 app.use(cors({
   origin: "http://localhost:3000",
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"],
   credentials: true
 }));
+app.use(bodyParser.json());
 
-// Generate RSA keys for the server
-const serverPrivateKey = new NodeRSA({b: 2048});
-const serverPublicKey = serverPrivateKey.exportKey('public');
+// MongoDB setup
+const mongoUrl = 'mongodb://localhost:27017/seechange';
+const JWT_SECRET = 'your_secret_key'; // Replace with a strong secret
 
-// NMS Configuration
+let dbClient;
+const activeStreams = {}; // Declare activeStreams at the correct scope
+
+// NodeMediaServer configuration
 const nmsConfig = {
   rtmp: {
     port: 1935,
@@ -59,35 +68,23 @@ const nmsConfig = {
     allow_origin: '*'
   },
   trans: {
-    ffmpeg: '/opt/homebrew/bin/ffmpeg',
+    ffmpeg: '/opt/homebrew/bin/ffmpeg', // Ensure this is the correct path to your FFmpeg binary
     tasks: [
       {
         app: 'live',
         hls: true,
         hlsFlags: '[hls_time=4:hls_list_size=6:hls_flags=delete_segments]',
-        hlsKeepSegments: 6 // This keeps only the last 6 segments
+        hlsKeepSegments: 6,
+        dash: true,
+        dashFlags: '[f=webm:window_size=5:extra_window_size=5]'
       }
     ]
   }
 };
+
 const nms = new NodeMediaServer(nmsConfig);
 nms.run();
 
-// Track active streams
-const activeStreams = {};
-const JWT_SECRET = 'your_secret_key'; // Replace with a strong secret
-const mongoUrl = 'mongodb://localhost:27017/seechange'; // Replace with your MongoDB connection string
-
-// In-memory storage for user credentials and keys
-const users = {
-  'user1': { password: 'password1' },
-  'user2': { password: 'password2' }
-};
-
-const userKeys = {};
-
-// Connect to MongoDB
-let dbClient;
 (async () => {
   try {
     dbClient = new MongoClient(mongoUrl);
@@ -97,36 +94,70 @@ let dbClient;
     const usersCollection = db.collection('users');
     const streamsCollection = db.collection('streams');
 
+    // User registration
+    app.post('/register', async (req, res) => {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password are required' });
+      }
+
+      const existingUser = await usersCollection.findOne({ username });
+      if (existingUser) {
+        return res.status(400).json({ error: 'User already exists' });
+      }
+
+      const key = new NodeRSA({ b: 2048 });
+      const privateKey = key.exportKey('private');
+      const publicKey = key.exportKey('public');
+
+      await usersCollection.insertOne({ username, password, privateKey, publicKey });
+      res.status(201).json({ message: 'User registered successfully' });
+    });
+
+    // Fetch public key
+    app.get('/publicKey', async (req, res) => {
+      const streamName = req.query.streamName;
+      if (!streamName) {
+        return res.status(400).json({ error: 'Stream name is required' });
+      }
+
+      const userId = streamName.split('_')[1];
+      if (!userId) {
+        return res.status(404).json({ error: 'Invalid stream name' });
+      }
+
+      try {
+        const user = await usersCollection.findOne({ username: userId });
+        if (!user) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+
+        const publicKey = user.publicKey;
+        if (!publicKey) {
+          return res.status(404).json({ error: 'Public key not found' });
+        }
+
+        res.json({ publicKey });
+      } catch (error) {
+        console.error('Error retrieving public key:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    // Socket.io handlers
     io.on('connection', (socket) => {
       console.log('User connected');
       let streamName = null;
       let userId = null;
       let ffmpegProcess = null;
-      const frameBuffer = [];
-      const MAX_BUFFER_SIZE = 100; // Example max buffer size
-      let frameInterval = 40; // Assuming 25 fps
-
-      const sendFrame = () => {
-        if (frameBuffer.length > 0 && ffmpegProcess && ffmpegProcess.stdin.writable) {
-          const frame = frameBuffer.shift();
-          ffmpegProcess.stdin.write(frame);
-        }
-      };
-      const frameTimer = setInterval(sendFrame, frameInterval);
 
       socket.on('login', async (username, password) => {
         try {
-          const user = users[username];
+          const user = await usersCollection.findOne({ username });
           if (user && user.password === password) {
-            // Generate RSA key pair for the user
-            const key = new NodeRSA({b: 2048});
-            userKeys[username] = {
-              privateKey: key.exportKey('private'),
-              publicKey: key.exportKey('public')
-            };
-
             const token = jwt.sign({ userId: username }, JWT_SECRET);
-            socket.emit('loginSuccess', token);
+            socket.emit('loginSuccess', token, user.privateKey);
+            console.log(`User ${username} logged in`);
           } else {
             socket.emit('loginError', 'Invalid username or password');
           }
@@ -161,8 +192,8 @@ let dbClient;
               endTime: null
             });
             ffmpegProcess = spawn('ffmpeg', [
-              '-framerate', '25',
-              '-f', 'mjpeg',
+              '-f', 'image2pipe',
+              '-vcodec', 'mjpeg',
               '-i', '-', // Input from stdin
               '-c:v', 'libx264',
               '-preset', 'veryfast',
@@ -175,12 +206,62 @@ let dbClient;
             });
             ffmpegProcess.on('close', (code) => {
               console.log(`FFmpeg process exited with code ${code}`);
-              frameBuffer.length = 0;
+              ffmpegProcess = null;
             });
             console.log(`Stream started: ${streamName}`);
           } catch (error) {
             console.error('Error starting stream:', error);
             socket.emit('streamError', 'Error starting stream');
+          }
+        } else {
+          socket.emit('authenticationError', 'Not authenticated');
+        }
+      });
+
+      socket.on('videoData', async (data) => {
+        const { videoBlob, signature } = data;
+        if (userId) {
+          console.log(`Received video data for user ${userId}`);
+
+          if (!videoBlob || !signature) {
+            console.error('Received null video data or signature');
+            socket.emit('streamError', 'Received null video data or signature');
+            return;
+          }
+
+          try {
+            const user = await usersCollection.findOne({ username: userId });
+            if (!user) {
+              console.error('User not found');
+              socket.emit('streamError', 'User not found');
+              return;
+            }
+
+            const userPublicKey = new NodeRSA(user.publicKey, 'public', { encryptionScheme: 'pkcs1' });
+            const videoBuffer = Buffer.from(videoBlob); // Convert videoBlob to Buffer correctly
+            const hash = crypto.createHash('sha256').update(videoBuffer).digest('base64');
+            console.log(`Public key for user ${userId}:`, user.publicKey);
+            console.log(`Video data hash for user ${userId}:`, hash);
+            console.log(`Signature received for user ${userId}:`, signature);
+
+            const isVerified = userPublicKey.verify(hash, Buffer.from(signature, 'base64'), 'base64', 'base64');
+
+            if (!isVerified) {
+              console.error('Signature verification failed');
+              socket.emit('streamError', 'Signature verification failed');
+              return;
+            }
+
+            // Forward raw video data to FFmpeg process
+            if (ffmpegProcess && ffmpegProcess.stdin.writable) {
+              ffmpegProcess.stdin.write(videoBuffer);
+            } else {
+              console.error('FFmpeg process is not writable');
+              socket.emit('streamError', 'FFmpeg process is not writable');
+            }
+          } catch (error) {
+            console.error('Error during verification or video processing:', error);
+            socket.emit('streamError', 'Error during verification or video processing');
           }
         } else {
           socket.emit('authenticationError', 'Not authenticated');
@@ -205,38 +286,6 @@ let dbClient;
             console.error('Error stopping stream:', error);
             socket.emit('streamError', 'Error stopping stream');
           }
-        }
-      });
-
-      socket.on('videoData', (encryptedData, checksum) => {
-        if (userId) {
-          if (!encryptedData) {
-            console.error('Received null video data');
-            socket.emit('streamError', 'Received null video data');
-            return;
-          }
-          try {
-            const user = users[userId];
-            const clientPrivateKey = new NodeRSA(userKeys[userId].privateKey, 'pkcs1-private-pem'); // Specify format
-            const binaryData = Buffer.from(clientPrivateKey.decrypt(encryptedData, 'base64'), 'base64');
-            const receivedChecksum = crypto.createHash('sha256').update(binaryData).digest('hex');
-            if (receivedChecksum !== checksum) {
-              console.error('Checksum mismatch');
-              socket.emit('streamError', 'Checksum mismatch');
-              return;
-            }
-            if (frameBuffer.length < MAX_BUFFER_SIZE) {
-              frameBuffer.push(binaryData);
-            } else {
-              console.warn('Frame buffer is full, dropping frame');
-            }
-          } catch (error) {
-            console.error('Error sending video data:', error);
-            logger.error('Error sending video data:', error);
-            socket.emit('streamError', 'Error sending video data');
-          }
-        } else {
-          socket.emit('authenticationError', 'Not authenticated');
         }
       });
 
@@ -265,7 +314,7 @@ let dbClient;
   }
 })();
 
-http.listen(3001, () => {
+server.listen(3001, () => {
   console.log('Server listening on port 3001');
 });
 

@@ -10,8 +10,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "blob-util": "^2.0.2",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "FileReader": "^0.10.2",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.7.0",
     "node-media-server": "^2.7.0",
