@@ -54,3 +54,5 @@ out/
 
 # Additional files from the screenshot
 public/
+
+.DS_Store
