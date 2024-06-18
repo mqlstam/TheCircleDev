@@ -13,44 +13,55 @@ function WatchingPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [streamList, setStreamList] = useState([]);
   const [streamError, setStreamError] = useState(null);
-  const [publicKeys, setPublicKeys] = useState({}); // Store public keys for verification
+  const [publicKeys, setPublicKeys] = useState({});
+  const segmentQueue = useRef([]); 
+  const processingSegment = useRef(false);
 
   useEffect(() => {
+    console.log("WatchingPage component mounted"); // Debug: Component lifecycle
+
     const newSocket = io('http://localhost:3001');
     setSocket(newSocket);
 
-    newSocket.on('streamStarted', async (streamName) => {
-      console.log('Stream started:', streamName);
-      await fetchPublicKey(streamName); // Fetch the public key when a stream starts
-      const url = `http://localhost:8000/live/${streamName}/index.m3u8`;
-      console.log('Stream URL:', url);
-      setStreamUrl(url);
-      setIsStreaming(true);
-      setIsLoading(true);
-    });
-
-    newSocket.on('streamStopped', (streamName) => {
-      console.log('Stream stopped:', streamName);
-      setStreamUrl('');
-      setIsStreaming(false);
-      setIsLoading(false);
-    });
-
-    newSocket.on('streamList', (list) => {
-      console.log('Stream list received:', list);
-      setStreamList(list);
-    });
-
-    newSocket.on('streamError', (error) => {
-      console.error('Stream error:', error);
-      setStreamError(error);
-    });
+    newSocket.on('streamStarted', handleStreamStarted);
+    newSocket.on('streamStopped', handleStreamStopped);
+    newSocket.on('streamList', handleStreamList);
+    newSocket.on('streamError', handleStreamError);
 
     return () => {
       newSocket.disconnect();
       console.log('Socket disconnected');
     };
   }, []);
+
+  // Event Handlers 
+  const handleStreamStarted = async (streamName) => {
+    console.log('Stream started:', streamName);
+    await fetchPublicKey(streamName);
+    const url = `http://localhost:8000/live/${streamName}/index.m3u8`;
+    console.log('Stream URL:', url);
+    setStreamUrl(url); 
+    setIsStreaming(true);
+    setIsLoading(true);
+  };
+
+
+  const handleStreamStopped = (streamName) => {
+    console.log('Stream stopped:', streamName);
+    setStreamUrl('');
+    setIsStreaming(false);
+    setIsLoading(false);
+  };
+
+  const handleStreamList = (list) => {
+    console.log('Stream list received:', list);
+    setStreamList(list);
+  };
+
+  const handleStreamError = (error) => {
+    console.error('Stream error:', error);
+    setStreamError(error);
+  };
 
   const fetchPublicKey = async (streamName) => {
     try {
@@ -68,7 +79,7 @@ function WatchingPage() {
 
   const handleStreamSelect = async (streamName) => {
     console.log('Stream selected:', streamName);
-    await fetchPublicKey(streamName); // Fetch the public key when a stream is selected
+    await fetchPublicKey(streamName);
     const url = `http://localhost:8000/live/${streamName}/index.m3u8`;
     console.log('Selected Stream URL:', url);
     setStreamUrl(url);
@@ -77,44 +88,35 @@ function WatchingPage() {
   };
 
   useEffect(() => {
+    console.log("useEffect for HLS setup triggered"); // Debug: Effect trigger
+    console.log("streamUrl in useEffect:", streamUrl); // Debug: Stream URL value
+
     let hls;
     let reconnectInterval;
 
     const setupHls = () => {
+      console.log("setupHls called"); // Debug: Function call
+      console.log("videoPlayerRef.current:", videoPlayerRef.current); // Debug: Video element
+
       if (streamUrl && videoPlayerRef.current) {
-        console.log('Initializing HLS.js with URL:', streamUrl);
+        console.log("Initializing HLS.js with URL:", streamUrl); 
         if (Hls.isSupported()) {
           hls = new Hls();
           hls.loadSource(streamUrl);
           hls.attachMedia(videoPlayerRef.current);
+
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             console.log('HLS Manifest Parsed');
             setIsLoading(false);
-            // Set to play the latest segment
             hls.startLoad(hls.media.duration - 5);
           });
-          hls.on(Hls.Events.FRAG_CHANGED, async (event, data) => {
-            const { frag } = data;
-            const streamName = frag.url.split('/')[4];
-            const publicKey = publicKeys[streamName];
 
-            if (publicKey) {
-              try {
-                console.log('Fetching and verifying video segment for stream:', streamName);
-                const videoData = await fetchVideoSegment(frag.url);
-                const isVerified = verifyVideoSegment(videoData, publicKey);
-                if (!isVerified) {
-                  console.error('Video segment verification failed.');
-                  setStreamError('Video segment verification failed.');
-                } else {
-                  console.log('Video segment verification succeeded.');
-                }
-              } catch (error) {
-                console.error('Error verifying video segment:', error);
-                setStreamError('Error verifying video segment.');
-              }
-            }
+          hls.on(Hls.Events.FRAG_LOADING, (event, data) => {
+            const { frag } = data;
+            segmentQueue.current.push(frag);
+            processSegmentQueue(hls); 
           });
+
           hls.on(Hls.Events.ERROR, (event, data) => {
             console.error('HLS.js Error:', event, data);
             if (data.fatal) {
@@ -155,6 +157,47 @@ function WatchingPage() {
           console.error('HLS is not supported in this browser.');
         }
       }
+    };
+
+    const processSegmentQueue = async (hlsInstance) => {
+      if (processingSegment.current || segmentQueue.current.length === 0) return;
+      processingSegment.current = true;
+
+      try {
+        const segment = segmentQueue.current.shift();
+        const streamName = segment.url.split('/')[4]; 
+        const publicKey = publicKeys[streamName]; 
+
+        if (publicKey) {
+          console.log('Fetching and verifying video segment for stream:', streamName);
+          const videoData = await fetchVideoSegment(segment.url);
+          const isVerified = verifyVideoSegment(videoData, publicKey);
+
+          if (!isVerified) {
+            console.error('Video segment verification failed.');
+            setStreamError('Video segment verification failed.');
+            // Potentially stop playback or handle the error differently
+          } else {
+            console.log('Video segment verification succeeded.');
+
+            // If verification succeeds, manually append the segment to the HLS playlist
+            hlsInstance.trigger(Hls.Events.FRAG_LOADED, {
+              frag: segment,
+              payload: {
+                url: segment.url,
+                data: videoData.buffer, // Pass the ArrayBuffer
+              },
+            });
+          }
+        } 
+
+      } catch (error) {
+        console.error('Error verifying video segment:', error);
+        setStreamError('Error verifying video segment.');
+      }
+
+      processingSegment.current = false;
+      processSegmentQueue(hlsInstance); // Process the next segment
     };
 
     const fetchVideoSegment = async (url) => {

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import Webcam from 'react-webcam';
@@ -16,7 +17,7 @@ function StreamingPage() {
   const [showLoginForm, setShowLoginForm] = useState(true);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [userPrivateKey, setUserPrivateKey] = useState('');
+  const [userPrivateKey, setUserPrivateKey] = useState(null); // Start as null 
   const [isRegistering, setIsRegistering] = useState(false);
   const [registrationError, setRegistrationError] = useState(null);
   const [registrationSuccess, setRegistrationSuccess] = useState(null);
@@ -25,97 +26,124 @@ function StreamingPage() {
   const frameQueue = useRef([]);
   const processingFrame = useRef(false);
 
+  // Configuration (Experiment for best balance)
+  const BATCH_SIZE = 5;        // Number of frames per batch
+  const CAPTURE_INTERVAL = 40; // Capture every 40ms (~25fps)
+
   useEffect(() => {
+    // Establish Socket Connection
     const newSocket = io('http://localhost:3001');
     setSocket(newSocket);
 
-    newSocket.on('authenticationSuccess', () => {
-      setIsAuthenticated(true);
-      setShowLoginForm(false);
-      setAuthError(null);
-    });
+    // Socket Event Handlers
+    newSocket.on('connect', () => console.log('Socket connected'));
+    newSocket.on('authenticationSuccess', handleAuthenticationSuccess);
+    newSocket.on('authenticationError', handleAuthenticationError);
+    newSocket.on('loginSuccess', handleLoginSuccess);
+    newSocket.on('loginError', handleLoginError);
 
-    newSocket.on('authenticationError', (error) => {
-      console.error('Authentication error:', error);
-      setAuthError(error);
-    });
-
-    newSocket.on('loginSuccess', (token, privateKey) => {
-      localStorage.setItem('token', token);
-      setUserPrivateKey(privateKey);
-      newSocket.emit('authenticate', token);
-    });
-
-    newSocket.on('loginError', (error) => {
-      console.error('Login error:', error);
-      setLoginError(error);
-    });
-
+    // Clean Up on Unmount
     return () => {
       newSocket.disconnect();
     };
   }, []);
 
+  // Authentication Effect (Runs after login and when socket connects)
+  useEffect(() => {
+    if (socket && localStorage.getItem('token') && userPrivateKey) { // Key is available now
+      socket.emit('authenticate', localStorage.getItem('token'));
+    }
+  }, [socket, userPrivateKey]); 
+
+  
+   // Event Handler Functions (Keep code organized)
+   const handleAuthenticationSuccess = () => {
+    setIsAuthenticated(true);
+    setShowLoginForm(false);
+    setAuthError(null);
+  };
+
+  const handleAuthenticationError = (error) => {
+    console.error('Authentication error:', error);
+    setAuthError(error);
+  };
+
+  const handleLoginSuccess = (token, privateKey) => {
+    localStorage.setItem('token', token);
+    setUserPrivateKey(privateKey);
+    // The useEffect will handle authentication
+  };
+
+  const handleLoginError = (error) => {
+    console.error('Login error:', error);
+    setLoginError(error);
+  };
+
   const processFrameQueue = async () => {
-    if (processingFrame.current || frameQueue.current.length === 0) return;
-
+    if (processingFrame.current || frameQueue.current.length === 0 || !userPrivateKey) { 
+      return; // Don't process if busy, queue is empty, or no private key
+    }
     processingFrame.current = true;
-    const frame = frameQueue.current.shift();
+
     try {
-      const videoDataUrl = frame;
-      // Convert data URL to Blob
-      const fetchResponse = await fetch(videoDataUrl);
-      const blob = await fetchResponse.blob();
+      const batch = [];
 
-      // Convert Blob to ArrayBuffer for signing
-      const arrayBuffer = await blob.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const userKey = new NodeRSA(userPrivateKey, 'private', { encryptionScheme: 'pkcs1' });
-      const hash = crypto.createHash('sha256').update(buffer).digest('base64');
-      const signature = userKey.sign(hash, 'base64');
+      while (frameQueue.current.length > 0 && batch.length < BATCH_SIZE) {
+        const videoDataUrl = frameQueue.current.shift();
 
-      console.log(`Video data hash (frontend): ${hash}`);
-      console.log(`Signature (frontend): ${signature}`);
+        const fetchResponse = await fetch(videoDataUrl);
+        const blob = await fetchResponse.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
 
-      if (socket) {
-        // Convert Blob to ArrayBuffer for sending
-        const arrayBufferBlob = await blob.arrayBuffer();
-        socket.emit('videoData', { videoBlob: arrayBufferBlob, signature: signature });
+        const userKey = new NodeRSA(userPrivateKey, 'private', { encryptionScheme: 'pkcs1' });
+        const hash = crypto.createHash('sha256').update(buffer).digest('base64');
+        const signature = userKey.sign(hash, 'base64');
+
+        batch.push({
+          videoBlob: arrayBuffer,
+          signature: signature
+        });
       }
+
+      if (batch.length > 0 && socket) {
+        socket.emit('videoDataBatch', batch);
+      }
+
     } catch (error) {
       console.error('Error processing video data:', error);
+      // Handle error (e.g., display to the user)
     }
+
     processingFrame.current = false;
-    processFrameQueue();
+    processFrameQueue(); 
   };
 
   const handleVideoData = async () => {
-    if (webcamRef.current) {
-      const videoDataUrl = webcamRef.current.getScreenshot();
-      if (!videoDataUrl) {
-        console.error('Failed to capture screenshot');
-        return;
-      }
-      frameQueue.current.push(videoDataUrl);
-      processFrameQueue();
+    if (webcamRef.current && webcamRef.current.state.hasUserMedia) { // Check initialization and permissions 
+      setTimeout(() => { 
+        const videoDataUrl = webcamRef.current.getScreenshot();
+        if (!videoDataUrl) {
+          console.error('Failed to capture screenshot');
+          return;
+        }
+        frameQueue.current.push(videoDataUrl);
+        processFrameQueue();
+      }, 500); // Adjust delay as needed
     }
   };
 
   const handleStartStop = () => {
-    if (!socket) {
-      console.error('Socket not initialized');
-      return;
-    }
+    if (!socket) return; // Short-circuit if no socket connection
 
     if (isCapturing) {
       socket.emit('stopStream');
       setIsCapturing(false);
       clearInterval(intervalId);
-      setIntervalId(null);
     } else {
       socket.emit('startStream');
       setIsCapturing(true);
-      const id = setInterval(handleVideoData, 40); // Capture frame every 40ms (25 fps)
+      const id = setInterval(handleVideoData, CAPTURE_INTERVAL); 
       setIntervalId(id);
     }
   };
@@ -232,12 +260,12 @@ function StreamingPage() {
           </button>
           {isCapturing && (
             <Webcam
-              audio={false}
-              ref={webcamRef}
-              screenshotFormat="image/jpeg"
-              width="640"
-              height="360"
-            />
+    audio={false}
+    ref={webcamRef}
+    screenshotFormat="image/jpeg"
+    width={320} // Reduced width
+    height={240} // Reduced height
+ />
           )}
           {!userId && <p>Enter a User ID to start streaming.</p>}
         </div>
