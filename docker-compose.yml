@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  streaming-server:
+    build: ./seechange-backend
+    volumes:
+      - ./seechange-backend:/app
+    ports:
+      - "1935:1935"
+      - "8000:8000"
+      - "8443:8443"
+      - "8080:8080"
+    command: ["npm", "start"]
+
+  my-webcam-app:
+    build:
+      context: ./seechange-frontend
+    volumes:
+      - ./seechange-frontend:/app
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    command: ["npm", "start"]

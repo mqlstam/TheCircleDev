@@ -17,7 +17,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: ["http://localhost:3000", "http://localhost:4200"],
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
     credentials: true
@@ -39,10 +39,10 @@ const logger = winston.createLogger({
 
 // Middleware Setup
 app.use(cors({
-  origin: "http://localhost:3000",
+  origin: ['http://localhost:3000', 'http://localhost:4200'], // Add Angular's origin
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"],
-  credentials: true
+  credentials: true 
 }));
 app.use(bodyParser.json());
 
@@ -73,11 +73,9 @@ const nmsConfig = {
       {
         app: 'live',
         hls: true,
-        hlsFlags: '[hls_time=2:hls_list_size=4:hls_flags=delete_segments]', // Optimize for low latency
+        hlsFlags: '[hls_time=10:hls_list_size=4:hls_flags=delete_segments]', // Set hls_time to 10         hlsKeepSegments: 4,
         hlsKeepSegments: 4,
-        dash: true, 
-        dashFlags: '[f=webm:window_size=3:extra_window_size=3]'  // Optimize for low latency
-      }
+    }
     ]
   }
 };
@@ -220,7 +218,7 @@ nms.run();
             '-c:v', 'libx264',
             '-preset', 'ultrafast', // Prioritize speed over compression
             '-tune', 'zerolatency',
-            '-crf', '51',          // Lower quality, higher speed 
+            '-crf', '18',          // Lower quality, higher speed 
             '-f', 'flv',
             `rtmp://localhost/live/${streamName}`
           ]);

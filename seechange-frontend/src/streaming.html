@@ -42,6 +42,12 @@
     const setupHls = () => {
       if (Hls.isSupported()) {
         hls = new Hls();
+
+        // Configure for better caching and lower latency
+        hls.config.maxBufferLength = 15; // Cache 15 seconds worth of segments (increased buffer)
+        hls.config.lowLatencyMode = true; // Enable low latency mode
+
+
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
